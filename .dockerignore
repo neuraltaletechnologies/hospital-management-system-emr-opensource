@@ -1,0 +1,20 @@
+# Keep the build context small. Database/ is intentionally NOT ignored (the image
+# restores from Database/1. Admin-Db/*.sql and Database/2. EMR-Db/**/*.zip).
+.git
+.git/**
+**/node_modules
+**/bin
+**/obj
+**/.vs
+**/.vscode
+**/dist
+Code/Solutions/packages
+Code/Solutions/packages/**
+**/*.user
+**/*.suo
+Code/Websites/DanpheEMR/wwwroot/DanpheApp/report.*.json
+Code/Websites/DanpheEMR/wwwroot/DanpheApp/src/main.js
+Code/Websites/DanpheEMR/wwwroot/DanpheApp/src/main.js.map
+CLAUDE.md
+docker/README.md
+**/*.md
