@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Throwaway Windows Server 2022 EC2 instance for building and running the Danphe EMR
+  all-in-one Windows container. Single instance, RDP restricted to one CIDR, IMDSv2
+  required, encrypted root volume, SSM enabled. Delete the stack to remove everything.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    why: >-
+      Local machine cannot run .NET Framework Windows containers without disrupting
+      other Docker workloads. This stack is a disposable build-and-demo box.
+    must:
+      - Instance type stays free-tier eligible on the AWS Free plan (m7i-flex.large default).
+      - RDP ingress never opens to 0.0.0.0/0.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Access }
+        Parameters: [AllowedCidr]
+      - Label: { default: Instance }
+        Parameters: [InstanceType, RootVolumeGiB, WindowsAmi]
+      - Label: { default: Network }
+        Parameters: [VpcId, SubnetId]
+
+Parameters:
+  AllowedCidr:
+    Type: String
+    Description: Source IP range allowed to reach RDP (3389). Use your.ip/32.
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: Must be a CIDR such as 203.0.113.5/32.
+  InstanceType:
+    Type: String
+    Default: m7i-flex.large
+    Description: EC2 instance type. m7i-flex.large is 2 vCPU / 8 GiB and free-tier eligible.
+  RootVolumeGiB:
+    Type: Number
+    Default: 256
+    MinValue: 128
+    Description: Root EBS volume size. Windows base images plus the build need well over 100 GiB.
+  WindowsAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+    Description: SSM public parameter that resolves to the latest Windows Server 2022 AMI.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the instance (the account default VPC is fine).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A public subnet in the chosen VPC (a default subnet auto assigns a public IP).
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: CloudFormation stores the private key as an SSM SecureString at /ec2/keypair/<id> for the deploy script to fetch.
+    Properties:
+      KeyName: !Sub "${AWS::StackName}-key"
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Description: Lets the instance be managed by SSM (Session Manager, Fleet Manager password reset).
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        must:
+          - Ingress limited to the AllowedCidr parameter. Never widen to 0.0.0.0/0.
+    Properties:
+      GroupDescription: !Sub "Danphe EMR build box. RDP from ${AllowedCidr} only."
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref AllowedCidr
+          Description: RDP from the operator.
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-sg" }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: UserData enables the Windows Containers feature and reboots once so Docker install after connect needs no further reboot.
+        mutability: replace-on-change
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref WindowsAmi
+      KeyName: !Ref KeyPair
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroup]
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref RootVolumeGiB
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: !Ref AWS::StackName }
+      UserData:
+        Fn::Base64: |
+          <powershell>
+          Start-Transcript -Path C:\bootstrap.log -Append
+          try {
+            Install-WindowsFeature -Name Containers
+          } catch {
+            $_ | Out-File C:\bootstrap-error.log -Append
+          }
+          Stop-Transcript
+          Restart-Computer -Force
+          </powershell>
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  PrivateKeyParameter:
+    Description: SSM parameter holding the PEM private key.
+    Value: !Sub "/ec2/keypair/${KeyPair.KeyPairId}"
+  FetchKeyCommand:
+    Value: !Sub "aws ssm get-parameter --name /ec2/keypair/${KeyPair.KeyPairId} --with-decryption --query Parameter.Value --output text > ${AWS::StackName}.pem"
+  GetPasswordCommand:
+    Value: !Sub "aws ec2 get-password-data --instance-id ${Instance} --priv-launch-key ${AWS::StackName}.pem --query PasswordData --output text"
+  RdpCommand:
+    Value: !Sub "mstsc /v:${Instance.PublicIp}"

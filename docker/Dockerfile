@@ -60,10 +60,13 @@ RUN Copy-Item -Recurse -Force C:\src\Code\Websites\DanpheEMR\wwwroot C:\build\ww
 # --- Build the Angular 7 SPA -----------------------------------------------
 #  Non-prod bundle names (runtime/polyfills/styles/vendor/main.js) are what
 #  Views/Home/Index.cshtml references. Output lands inside the staged wwwroot.
+#  Node heap is capped at NG_HEAP_MB (default 4096) so the build fits on an
+#  8 GiB VM; bump it with --build-arg NG_HEAP_MB=8192 on a bigger box.
+ARG NG_HEAP_MB=4096
 WORKDIR C:\src\Code\Websites\DanpheEMR\wwwroot\DanpheApp
-ENV NODE_OPTIONS=--max-old-space-size=8192
 RUN C:\node\npm.cmd install --no-audit --no-fund --loglevel=error
-RUN C:\node\npm.cmd run build -- `
+RUN & C:\node\node.exe --max-old-space-size=${NG_HEAP_MB} `
+      .\node_modules\@angular\cli\bin\ng build `
       --output-path C:\build\wwwroot\DanpheApp\dist\DanpheApp `
       --deploy-url /DanpheApp/dist/DanpheApp/ `
       --output-hashing none

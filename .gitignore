@@ -9,3 +9,10 @@ packages
 package-lock.json
 $tf/
 .tfignore
+
+# secrets / local infra artifacts - never commit
+*.pem
+*.ppk
+docker/*.pem
+.env
+.env.*

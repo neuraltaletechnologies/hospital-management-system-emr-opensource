@@ -10,6 +10,7 @@
 param(
     [string]$Tag        = 'danphe-emr:local',
     [string]$WindowsTag = 'ltsc2022',
+    [int]   $NgHeapMB   = 4096,     # Angular build node heap cap; raise on a box with >8 GiB RAM
     [switch]$NoCache
 )
 
@@ -65,7 +66,7 @@ $dockerArgs = [System.Collections.Generic.List[string]]@(
     '-f', 'docker/Dockerfile'
     '-t', $Tag
     '--build-arg', "WINDOWS_TAG=$WindowsTag"
-    '--memory', '8g'          # ng build / MSBuild are memory-hungry
+    '--build-arg', "NG_HEAP_MB=$NgHeapMB"
 )
 if ($NoCache) { $dockerArgs.Add('--no-cache') }
 $dockerArgs.Add('.')

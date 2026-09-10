@@ -1,11 +1,12 @@
 # Run Danphe EMR on a throwaway cloud Windows VM
 
 Builds and runs the all-in-one Windows container on a rented Windows Server 2022 VM, so
-your local Docker (Odoo / Omada / Postgres / …) is never touched. RDP in and use the app
-in the VM's browser. Delete the VM when done — billing stops.
+your local Docker (Odoo / Omada / Postgres / ...) is never touched. RDP in and use the app
+in the VM's browser. Delete the stack/VM when done and billing stops.
 
-**Rough cost:** `Standard_D4s_v5` ≈ **$0.40/hr** all-in (compute + Windows licence + disk);
-`Standard_D8s_v5` ≈ $0.80/hr and builds ~2× faster. A first build + a few hours of use ≈ **$3–6**.
+**Cost on the AWS Free plan:** `m7i-flex.large` (2 vCPU / 8 GiB) is free-tier eligible, so a
+build plus a few hours of use is drawn from your $100 credits (effectively free). It is a
+small box, so the first build takes **~60-90 min**.
 
 ---
 
@@ -15,40 +16,36 @@ The `docker/` folder and `.dockerignore` are new and uncommitted. From your **lo
 
 ```powershell
 cd C:\Am_jhey\Github\hospital-management-system-emr-opensource
-git add docker .dockerignore CLAUDE.md
-git commit -m "Add Windows-container setup for Danphe EMR"
+git add docker .dockerignore CLAUDE.md .gitignore
+git commit -m "Add Windows-container + cloud-VM setup"
 git push origin master
 ```
 
-(If your fork is private, you'll also need a GitHub Personal Access Token when you `git clone` on the VM.)
+(If your fork is private, you also need a GitHub Personal Access Token when you `git clone` on the VM.)
 
 ---
 
 ## 1. Create the VM
 
-### AWS (EC2) — use `docker/aws-vm.ps1`
+### AWS (CloudFormation) - `docker/aws/deploy.ps1`
 
-From your **local** machine (AWS CLI already configured):
+From your **local** machine (AWS CLI configured, default VPC present):
 
 ```powershell
 cd C:\Am_jhey\Github\hospital-management-system-emr-opensource
-.\docker\aws-vm.ps1                    # m5.xlarge, 256 GB, RDP locked to your IP
-#   -Size m5.2xlarge   for a ~2x faster build (~$0.57/hr vs ~$0.30/hr in eu-central-1)
+.\docker\aws\deploy.ps1
+#   -InstanceType c5.2xlarge   only after upgrading the account to the Paid plan
 ```
 
-It resolves the latest Windows Server 2022 AMI, creates a key pair (`docker/danphe-emr-key.pem`)
-and a security group (RDP from your current IP only), launches the instance, and prints the
-**RDP host / Administrator / password**. `.\docker\aws-vm.ps1 -Info` reprints them later.
+`deploy.ps1` finds your default VPC/subnet and public IP, then deploys the
+**`docker/aws/danphe-emr-vm.yaml`** stack: one `m7i-flex.large` Windows Server 2022 instance,
+RDP restricted to your `/32`, IMDSv2 required, encrypted 256 GiB root, SSM enabled. It fetches
+the auto-generated private key from SSM to `docker/aws/danphe-emr.pem` (git-ignored) and prints
+**RDP host / Administrator / password**. Reprint later with `.\docker\aws\deploy.ps1 -Info`.
 
-Needs a default VPC in the region (`aws ec2 describe-vpcs --filters Name=isDefault,Values=true`).
-Uses your default region (`eu-central-1`); override with `-Region`.
+Tear down with `.\docker\aws\deploy.ps1 -Delete` (deletes the whole stack).
 
-> You're authenticated as the account **root user**. Fine for a one-off, but consider an IAM
-> user with `AmazonEC2FullAccess` instead of root access keys.
-
-Then skip to **step 2**.
-
-### Azure (CLI) — alternative
+### Azure (CLI) - alternative
 
 Install [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) locally, `az login`, then:
 
@@ -83,7 +80,7 @@ Inbound port **RDP (3389)**. After it's created, restrict the RDP NSG rule to yo
 
 ## 2. RDP in and bootstrap
 
-`mstsc /v:<public-ip>` → **AWS:** user `Administrator` + the password `aws-vm.ps1` printed.
+`mstsc /v:<public-ip>` -> **AWS:** user `Administrator` + the password `deploy.ps1` printed.
 **Azure:** user `azureuser` + the password you saved.
 
 In an **elevated PowerShell** on the VM:
@@ -94,9 +91,9 @@ iwr https://raw.githubusercontent.com/neuraltaletechnologies/hospital-management
 .\setup-vm.ps1
 ```
 
-`setup-vm.ps1` installs Docker CE + the Containers feature (Microsoft's installer — **it
-reboots the VM once**; reconnect RDP after ~2 min and re-run the script if `docker version`
-still errors), then git.
+`setup-vm.ps1` installs Docker CE and git. On the AWS box the Containers feature is already on
+(the CloudFormation UserData enabled it and rebooted once before you connected), so no further
+reboot. If `docker version` errors, wait ~1 min for that reboot to finish and re-run the script.
 
 ---
 
@@ -105,15 +102,16 @@ still errors), then git.
 ```powershell
 git clone https://github.com/neuraltaletechnologies/hospital-management-system-emr-opensource.git C:\danphe
 cd C:\danphe
-.\docker\build.ps1        # 30-50 min on D4s_v5
-.\docker\run.ps1          # first start restores the DBs (~3-6 min)
+.\docker\build.ps1        # ~60-90 min on m7i-flex.large (2 vCPU)
+.\docker\run.ps1          # first start restores the DBs (~5-10 min on this box)
 ```
 
-Then in the VM's browser (Edge is preinstalled): **http://localhost:8080/** → `admin` / `pass123`.
+Then in the VM's browser (Edge is preinstalled): **http://localhost:8080/** -> `admin` / `pass123`.
 
-`build.ps1` will notice Docker is already in Windows mode and skip the engine switch — the
-Docker-Desktop-specific steps (`enable-windows-containers.ps1`, containerd toggle) do **not**
-apply on a Windows Server VM.
+`build.ps1` notices Docker is already in Windows mode and skips the engine switch. The
+Docker-Desktop-only steps (`enable-windows-containers.ps1`, the containerd toggle) do **not**
+apply on a Windows Server VM. `build.ps1` caps the Angular build heap at 4 GiB (`-NgHeapMB`)
+so it fits in 8 GiB.
 
 ### See the app from your own browser (optional)
 
@@ -125,8 +123,9 @@ own machine instead, open port 8080 on the VM **and** in the cloud firewall:
 New-NetFirewallRule -DisplayName "danphe-8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
 ```
 ```powershell
-# locally - AWS
-$sg = (aws ec2 describe-security-groups --group-names danphe-emr-sg --query 'SecurityGroups[0].GroupId' --output text)
+# locally - AWS (add 8080 to the stack's security group, from your IP)
+$sg = (aws cloudformation describe-stack-resources --stack-name danphe-emr `
+  --logical-resource-id SecurityGroup --query 'StackResources[0].PhysicalResourceId' --output text)
 aws ec2 authorize-security-group-ingress --group-id $sg --protocol tcp --port 8080 `
   --cidr "$((Invoke-RestMethod https://checkip.amazonaws.com).Trim())/32"
 
@@ -143,20 +142,22 @@ then browse to `http://<public-ip>:8080/`.
 
 **AWS:**
 ```powershell
-.\docker\aws-vm.ps1 -Terminate          # deletes instance + security group + key pair
+.\docker\aws\deploy.ps1 -Delete                    # delete the whole stack - billing stops
 
-# or just stop it to resume later (still pay ~$0.02/hr for the 256 GB disk):
-aws ec2 stop-instances  --instance-ids <id>
-aws ec2 start-instances --instance-ids <id>
+# or just stop the instance to resume later (still pay ~$0.02/hr for the 256 GiB disk):
+$id = (aws cloudformation describe-stacks --stack-name danphe-emr `
+       --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+aws ec2 stop-instances  --instance-ids $id
+aws ec2 start-instances --instance-ids $id
 ```
 
 **Azure:**
 ```powershell
 az vm deallocate -g danphe-emr-rg -n danphe-vm     # stop compute charges (keeps the disk)
 az vm start      -g danphe-emr-rg -n danphe-vm     # resume later
-az group delete  -n danphe-emr-rg --yes --no-wait  # DELETE EVERYTHING - billing stops
+az group delete  -n danphe-emr-rg --yes --no-wait  # DELETE EVERYTHING, billing stops
 ```
 
-The container's databases live on a Docker volume **inside the VM**, so terminating the instance
-removes them too. To keep a built image: `docker save danphe-emr:local -o C:\danphe.tar` and copy
-it off the VM first.
+The container's databases live on a Docker volume **inside the VM**, so deleting the stack
+removes them too. To keep a built image: `docker save danphe-emr:local -o C:\danphe.tar` and
+copy it off the VM first.
