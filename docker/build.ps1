@@ -17,19 +17,44 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $repoRoot
 
+# --- locate Docker Desktop's DockerCli.exe (per-user or per-machine install) --
+function Get-DockerCli {
+    @(
+        "$env:LOCALAPPDATA\Programs\DockerDesktop\DockerCli.exe"
+        "$env:ProgramFiles\Docker\Docker\DockerCli.exe"
+        "$env:ProgramFiles\Docker\Docker\resources\DockerCli.exe"
+        "${env:ProgramFiles(x86)}\Docker\Docker\DockerCli.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
 # --- make sure the Docker daemon is in Windows-container mode ----------------
 $serverOs = (& docker version --format '{{.Server.Os}}' 2>$null)
 if ($serverOs -ne 'windows') {
-    Write-Warning "Docker is currently in '$serverOs' container mode - Windows containers are required."
-    $cli = "$env:ProgramFiles\Docker\Docker\DockerCli.exe"
-    if (Test-Path $cli) {
-        Write-Host 'Switching Docker Desktop to Windows containers...' -ForegroundColor Cyan
-        & $cli -SwitchWindowsEngine
-        Start-Sleep -Seconds 8
-        $serverOs = (& docker version --format '{{.Server.Os}}' 2>$null)
+    Write-Warning "Docker is in '$serverOs' container mode - this image needs Windows containers."
+    $cli = Get-DockerCli
+    if (-not $cli) {
+        throw "DockerCli.exe not found. Switch via the Docker tray icon -> 'Switch to Windows containers...' and re-run."
     }
+    Write-Host "Switching Docker Desktop to the Windows engine ($cli)..." -ForegroundColor Cyan
+    & $cli -SwitchWindowsEngine
+    Start-Sleep -Seconds 10
+    $serverOs = (& docker version --format '{{.Server.Os}}' 2>$null)
+
     if ($serverOs -ne 'windows') {
-        throw "Could not switch to Windows containers. Right-click the Docker tray icon -> 'Switch to Windows containers...', then re-run this script."
+        Write-Host ""
+        Write-Warning @"
+Still in '$serverOs' mode. The switch usually fails for one of these reasons:
+
+  1. Docker Desktop's 'containerd image store' is ON (Settings -> General ->
+     uncheck 'Use containerd for pulling and storing images' -> Apply & restart).
+     Windows containers are NOT supported with the containerd store.
+
+  2. The Windows 'Containers' feature is not enabled.
+
+Run (as Administrator):   .\docker\enable-windows-containers.ps1
+then reboot if it asks, start Docker Desktop, and re-run this script.
+"@
+        throw "Docker is not in Windows-container mode."
     }
 }
 Write-Host "Docker daemon OS: $serverOs" -ForegroundColor Green

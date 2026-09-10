@@ -31,16 +31,23 @@ The backend targets **.NET Framework 4.6.1** and references Windows-only assembl
 
 ## One-time: enable Windows containers
 
-1. Docker Desktop → **Settings → General** → make sure *"Use the WSL 2 based engine"* is fine to leave on;
-   Windows-container support is separate.
-2. If the Windows features aren't on yet, from an **elevated PowerShell**:
-   ```powershell
-   Enable-WindowsOptionalFeature -Online -FeatureName Containers -All
-   Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All   # if available on your SKU
-   ```
-   Reboot if prompted.
-3. Right-click the Docker tray icon → **"Switch to Windows containers…"**
-   (or let `build.ps1` do it). Your Linux containers pause while in this mode; switch back the same way.
+From an **elevated PowerShell** at the repo root:
+
+```powershell
+.\docker\enable-windows-containers.ps1
+```
+
+It does the three things Windows containers need:
+
+1. enables the Windows **Containers** feature (and Hyper-V) — **reboot** if it says so
+2. turns **off** Docker Desktop's *containerd image store* — Windows containers do **not**
+   work with it (Settings → General → "Use containerd for pulling and storing images")
+3. switches Docker Desktop to the **Windows engine**
+
+Your Linux containers just pause while in Windows mode; switch back any time with the Docker
+tray icon → *"Switch to Linux containers…"* (or `DockerCli.exe -SwitchLinuxEngine`).
+
+After a reboot: start Docker Desktop, then run `.\docker\build.ps1`.
 
 ## Build & run
 
