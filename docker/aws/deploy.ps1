@@ -10,10 +10,10 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Stack        = 'danphe-emr',
-    [string]$InstanceType = 'm7i-flex.large',
+    [string]$Stack         = 'danphe-emr',
+    [string]$InstanceType  = 'm7i-flex.large',
     [int]   $RootVolumeGiB = 256,
-    [string]$Region       = '',
+    [string]$Region        = '',
     [switch]$Info,
     [switch]$Delete
 )
@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 $templatePath = Join-Path $PSScriptRoot 'danphe-emr-vm.yaml'
 $pemPath      = Join-Path $PSScriptRoot "$Stack.pem"
 
-# --- aws.exe ------------------------------------------------------------
+# --- aws.exe -------------------------------------------------------------
 $awsExe = (Get-Command aws -ErrorAction SilentlyContinue).Source
 if (-not $awsExe) {
     $awsExe = @(
@@ -31,27 +31,35 @@ if (-not $awsExe) {
     ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 if (-not $awsExe) { throw "aws.exe not found. Install AWS CLI v2." }
-$R = @(); if ($Region) { $R = @('--region', $Region) }
-function AWS { & $awsExe @R @args }
+if ($Region) { $env:AWS_REGION = $Region; $env:AWS_DEFAULT_REGION = $Region }
+
+# Wrapper: run aws.exe, throw on non-zero, return trimmed stdout.
+function Invoke-AwsRaw {
+    param([Parameter(ValueFromRemainingArguments)] [string[]] $Args)
+    $out = & $awsExe @Args 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "aws $($Args -join ' ')`n$out" }
+    ($out | Out-String).Trim()
+}
 
 function Get-Outputs {
-    $j = AWS cloudformation describe-stacks --stack-name $Stack --query 'Stacks[0].Outputs' --output json 2>$null
-    if (-not $j) { return $null }
+    $j = & $awsExe cloudformation describe-stacks --stack-name $Stack --query 'Stacks[0].Outputs' --output json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $j) { return $null }
     $o = @{}; ($j | ConvertFrom-Json) | ForEach-Object { $o[$_.OutputKey] = $_.OutputValue }
     $o
 }
 
 function Show-Access {
     $o = Get-Outputs
-    if (-not $o) { throw "Stack '$Stack' not found." }
+    if (-not $o) { throw "Stack '$Stack' has no outputs yet." }
     if (-not (Test-Path $pemPath)) {
         Write-Host "Fetching private key -> $pemPath" -ForegroundColor Cyan
-        AWS ssm get-parameter --name $o.PrivateKeyParameter --with-decryption --query 'Parameter.Value' --output text | Set-Content $pemPath -Encoding ascii
+        Invoke-AwsRaw ssm get-parameter --name $o.PrivateKeyParameter --with-decryption --query 'Parameter.Value' --output text |
+            Set-Content $pemPath -Encoding ascii
     }
-    Write-Host "Waiting for the Windows password to be available (~4 min after first boot)..." -ForegroundColor Cyan
-    AWS ec2 wait password-data-available --instance-ids $o.InstanceId
-    $pw = AWS ec2 get-password-data --instance-id $o.InstanceId --priv-launch-key $pemPath --query 'PasswordData' --output text
-    $ip = AWS ec2 describe-instances --instance-ids $o.InstanceId --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+    Write-Host "Waiting for the Windows password (~4 min after first boot)..." -ForegroundColor Cyan
+    & $awsExe ec2 wait password-data-available --instance-ids $o.InstanceId
+    $pw = Invoke-AwsRaw ec2 get-password-data --instance-id $o.InstanceId --priv-launch-key $pemPath --query 'PasswordData' --output text
+    $ip = Invoke-AwsRaw ec2 describe-instances --instance-ids $o.InstanceId --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
 
     Write-Host "`n=======================================================" -ForegroundColor Green
     Write-Host "  RDP host : $ip"
@@ -79,8 +87,8 @@ Tear down when finished:   .\docker\aws\deploy.ps1 -Delete
 # ======================================================================
 if ($Delete) {
     Write-Host "Deleting stack '$Stack'..." -ForegroundColor Yellow
-    AWS cloudformation delete-stack --stack-name $Stack
-    AWS cloudformation wait stack-delete-complete --stack-name $Stack
+    & $awsExe cloudformation delete-stack --stack-name $Stack
+    & $awsExe cloudformation wait stack-delete-complete --stack-name $Stack
     Remove-Item $pemPath -ErrorAction SilentlyContinue
     Write-Host "Stack deleted. Nothing left to pay for." -ForegroundColor Green
     return
@@ -88,22 +96,28 @@ if ($Delete) {
 
 if ($Info) { Show-Access; return }
 
-# --- create ----------------------------------------------------------
-$exists = AWS cloudformation describe-stacks --stack-name $Stack --query 'Stacks[0].StackStatus' --output text 2>$null
-if ($exists) { throw "Stack '$Stack' already exists ($exists). Use -Info or -Delete." }
+# --- create ---------------------------------------------------------
+$status = & $awsExe cloudformation describe-stacks --stack-name $Stack --query 'Stacks[0].StackStatus' --output text 2>$null
+if ($LASTEXITCODE -eq 0 -and $status) {
+    throw "Stack '$Stack' already exists ($status). Use -Info, or -Delete first."
+}
 
-Write-Host "[1/4] discovering default VPC + subnet + your IP" -ForegroundColor White
-$vpc = AWS ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text
-if (-not $vpc -or $vpc -eq 'None') { throw "No default VPC in this region. Pass VpcId/SubnetId manually or create a default VPC." }
-$subnet = AWS ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" Name=default-for-az,Values=true --query 'Subnets[0].SubnetId' --output text
-$myip   = (Invoke-RestMethod 'https://checkip.amazonaws.com').Trim()
-Write-Host "      vpc=$vpc subnet=$subnet cidr=$myip/32"
+Write-Host "[1/4] discovering default VPC + subnet + your public IP" -ForegroundColor White
+$vpc = Invoke-AwsRaw ec2 describe-vpcs --filters 'Name=isDefault,Values=true' --query 'Vpcs[0].VpcId' --output text
+if (-not $vpc -or $vpc -eq 'None') {
+    throw "No default VPC in this region. Create one with:  aws ec2 create-default-vpc"
+}
+$subnet = Invoke-AwsRaw ec2 describe-subnets `
+    --filters "Name=vpc-id,Values=$vpc" 'Name=default-for-az,Values=true' `
+    --query 'Subnets[0].SubnetId' --output text
+$myip = (Invoke-RestMethod 'https://checkip.amazonaws.com').Trim()
+Write-Host "      vpc=$vpc  subnet=$subnet  cidr=$myip/32" -ForegroundColor Green
 
 Write-Host "[2/4] creating stack '$Stack' ($InstanceType)" -ForegroundColor White
-AWS cloudformation create-stack --stack-name $Stack `
+Invoke-AwsRaw cloudformation create-stack --stack-name $Stack `
     --template-body "file://$templatePath" `
     --capabilities CAPABILITY_IAM `
-    --on-failure DELETE `
+    --on-failure DO_NOTHING `
     --parameters `
         "ParameterKey=AllowedCidr,ParameterValue=$myip/32" `
         "ParameterKey=InstanceType,ParameterValue=$InstanceType" `
@@ -111,15 +125,14 @@ AWS cloudformation create-stack --stack-name $Stack `
         "ParameterKey=VpcId,ParameterValue=$vpc" `
         "ParameterKey=SubnetId,ParameterValue=$subnet" | Out-Null
 
-Write-Host "[3/4] waiting for stack to finish (~3-5 min)..." -ForegroundColor White
-try {
-    AWS cloudformation wait stack-create-complete --stack-name $Stack
-} catch {
-    Write-Warning "Stack did not reach CREATE_COMPLETE. Failure events:"
-    AWS cloudformation describe-events --stack-name $Stack --filters FailedEvents=true `
-        --query 'StackEvents[].[LogicalResourceId,ResourceStatusReason]' --output text 2>$null
-    AWS cloudformation describe-stack-events --stack-name $Stack `
-        --query 'StackEvents[?contains(ResourceStatus,`FAILED`)].[LogicalResourceId,ResourceStatusReason]' --output text 2>$null
+Write-Host "[3/4] waiting for the stack to finish (~3-5 min)..." -ForegroundColor White
+& $awsExe cloudformation wait stack-create-complete --stack-name $Stack
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Stack did not reach CREATE_COMPLETE. Failed resources:"
+    & $awsExe cloudformation describe-stack-events --stack-name $Stack `
+        --query "StackEvents[?ends_with(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatusReason]" `
+        --output text
+    Write-Host "`nInspect, then clean up with:  .\docker\aws\deploy.ps1 -Delete" -ForegroundColor Yellow
     throw "create-stack failed."
 }
 
